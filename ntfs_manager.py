@@ -580,6 +580,9 @@ class App(tk.Tk):
         drive_m.add_command(label="Format…",                 command=self.format_volume)
         drive_m.add_command(label="Rename Volume",          command=self.rename_volume)
         drive_m.add_separator()
+        drive_m.add_command(label="Set Up Mac Apps Partition (APFS)…",
+                            command=self.setup_apps_partition)
+        drive_m.add_separator()
         drive_m.add_command(label="Eject",   command=self.eject_drive)
         drive_m.add_command(label="Refresh", command=self.manual_refresh, accelerator="⌘R")
         self.bind_all("<Command-r>", lambda _: self.manual_refresh())
@@ -889,6 +892,51 @@ class App(tk.Tk):
         part = self._selected
         if part and part.mount:
             subprocess.Popen(["open", part.mount])
+
+    def setup_apps_partition(self):
+        """Guide the user through carving an APFS partition (for running Mac
+        apps) using Apple's Disk Utility — we never touch the partition table
+        ourselves, so there's no risk of us corrupting the disk."""
+        import re as _re
+        part = self._selected
+        disk_hint = ""
+        if part and part.dev:
+            m = _re.match(r"(/dev/disk\d+)", part.dev)
+            if m:
+                disk_hint = f"\n\nYour drive is likely the device containing “{part.name}”."
+
+        steps = (
+            "Mac apps can run from an external drive — but only from an APFS "
+            "(Mac-formatted) partition, never NTFS. This sets one up safely using "
+            "Apple’s Disk Utility. NTFS Manager will not modify your disk itself.\n"
+            "\n"
+            "⚠️  Resizing a partition can erase it if it fails. Back up the data on "
+            "this drive before you start.\n"
+            f"{disk_hint}\n"
+            "\n"
+            "Steps in Disk Utility:\n"
+            "1.  In the menu bar choose  View → Show All Devices.\n"
+            "2.  In the sidebar select the whole external DISK (the top-level\n"
+            "     hardware item), not the indented volume under it.\n"
+            "3.  Click  Partition  in the toolbar.\n"
+            "4.  Click the  +  button to add a partition.\n"
+            "5.  Set  Format: APFS , drag the size you want, and name it\n"
+            "     (e.g. “Mac Apps”).\n"
+            "6.  Click  Apply  and confirm. This shrinks the NTFS space to make\n"
+            "     room — it can take a while; don’t unplug the drive.\n"
+            "\n"
+            "Then, in Finder, drag apps from /Applications onto the new APFS\n"
+            "volume and launch them from there.\n"
+            "\n"
+            "Note: Mac App Store apps (e.g. CapCut) and apps with system\n"
+            "extensions often refuse to run outside /Applications — standalone\n"
+            "drag-to-install apps work best."
+        )
+        if messagebox.askokcancel(
+            "Set Up a Mac Apps Partition", steps + "\n\nOpen Disk Utility now?",
+            parent=self,
+        ):
+            subprocess.Popen(["open", "-a", "Disk Utility"])
 
     def eject_drive(self):
         part = self._selected
