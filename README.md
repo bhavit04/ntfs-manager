@@ -86,18 +86,16 @@ The build is **ad-hoc signed**, which is fine on your own Mac but will trigger
 Gatekeeper on someone else's ("can't be opened because Apple cannot check it").
 
 The DMG is built to guide users through this with zero terminal use:
-- **`① READ ME — First Launch.txt`** — step-by-step instructions
-- **`② Open Privacy & Security.webloc`** — double-click jumps straight to the
-  Settings pane with the "Open Anyway" button
-- In-app: **Help → ""App can't be opened" — how to allow it"** re-explains it and
-  opens the right pane (useful on re-opens). Note the app can't auto-handle its
-  *own* first block — it isn't running yet — which is why the DMG carries the steps.
+- **`READ ME — First Launch.txt`** — step-by-step instructions in the DMG
+- In-app: **Help → ""App can't be opened" — how to allow it"** re-opens the right
+  Settings pane any time *after* the first launch. (The app can't auto-handle its
+  *own* first block — it isn't running yet — which is why the DMG carries the steps.)
 
-Two ways to clear the block:
+To clear the block (one time, no terminal):
 
-- **Quick/free (no terminal):** open the app once, then System Settings →
-  Privacy & Security → **"Open Anyway"** (the `.webloc` jumps you there).
-- **Proper:** sign and notarize with an Apple Developer ID ($99/yr):
+- Open the app once → click **Done** on the warning → **System Settings →
+  Privacy & Security** → scroll to the bottom → **"Open Anyway"** → confirm.
+- **Proper alternative:** sign and notarize with an Apple Developer ID ($99/yr):
 
   ```bash
   codesign --deep --force --options runtime \
