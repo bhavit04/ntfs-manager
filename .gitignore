@@ -1,0 +1,25 @@
+# Build / work artifacts
+build/
+dist/
+build_venv/
+ntfs3g-src/
+ntfs3g-build-out/
+fuse-pc/
+AppIcon.icns
+AppIcon.iconset/
+
+# Python
+__pycache__/
+*.pyc
+
+# macOS
+.DS_Store
+
+# Personal / QA-only (not for publication)
+linkedin_post.txt
+setup.sh
+test_uninstall_deps.sh
+restore_deps.sh
+
+# App runtime settings/state
+.ntfs_settings.json
