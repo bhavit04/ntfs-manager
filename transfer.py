@@ -157,6 +157,7 @@ class TransferJob:
         self.conflict    = conflict
         self.verify      = verify
         self.stats       = TransferStats()
+        self.transferred: list[tuple[str, str]] = []   # (src, dst) for undo
         self._on_progress = on_progress or (lambda _: None)
         self._on_done     = on_done     or (lambda _: None)
         self._cancel      = threading.Event()
@@ -243,6 +244,7 @@ class TransferJob:
                 try: os.remove(src)
                 except OSError: pass
 
+            self.transferred.append((src, dst))
             self.stats.done_files += 1
 
             # Speed calculation

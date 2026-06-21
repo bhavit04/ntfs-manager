@@ -14,6 +14,7 @@ from tkinter import ttk, messagebox, simpledialog
 from typing import Callable, Optional
 
 from widgets import FlatButton
+import undo as undo_mod
 
 _PLACEHOLDER = "__ph__"
 
@@ -69,6 +70,7 @@ class BrowserPane(tk.Frame):
         show_hidden: bool = False,
         writable: bool = True,
         confined: bool = False,
+        quick_access: bool = False,
         on_selection_change: Optional[Callable[[list[str]], None]] = None,
         on_navigate: Optional[Callable[[str], None]] = None,
         **kwargs,
@@ -80,9 +82,14 @@ class BrowserPane(tk.Frame):
         self._show_hidden = show_hidden
         self.writable    = writable          # True = allow destructive ops
         self._confined   = confined          # True = cannot navigate above root_path
+        self._quick      = quick_access      # show Home/Apps/etc. shortcut row
         self._on_sel     = on_selection_change or (lambda _: None)
         self._on_nav     = on_navigate or (lambda _: None)
         self._search_var = tk.StringVar()
+        self.drop_router = None               # set by DualBrowser
+        self.undo_mgr    = None               # set by DualBrowser
+        self._drag       = None               # in-progress drag state
+        self._drop_hl    = ""                 # row iid currently highlighted as drop target
         self._build()
         self.navigate(root_path)
 
@@ -130,6 +137,27 @@ class BrowserPane(tk.Frame):
             relief="flat", bd=0, cursor="hand2",
             command=self._toggle_hidden,
         ).pack(side="right")
+
+        # Quick-access shortcuts (Mac pane only) — jump to common folders
+        if self._quick:
+            qbar = tk.Frame(self, bg=C["surface2"], padx=6, pady=4)
+            qbar.pack(fill="x")
+            home = os.path.expanduser("~")
+            shortcuts = [
+                ("🏠 Home",      home),
+                ("🖥 Desktop",   os.path.join(home, "Desktop")),
+                ("📄 Documents", os.path.join(home, "Documents")),
+                ("⬇ Downloads", os.path.join(home, "Downloads")),
+                ("📱 Apps",      "/Applications"),
+            ]
+            for label, dest in shortcuts:
+                if not os.path.isdir(dest):
+                    continue
+                FlatButton(
+                    qbar, text=label, font=("Helvetica Neue", 9),
+                    bg=C["border"], fg=C["text"], padx=8, pady=2,
+                    command=lambda d=dest: self.navigate(d),
+                ).pack(side="left", padx=(0, 4))
 
         # Search bar (hidden by default)
         self._search_frame = tk.Frame(self, bg=C["surface2"], padx=8, pady=3)
@@ -194,6 +222,9 @@ class BrowserPane(tk.Frame):
         # Subtle alternating row stripes (professional list look)
         self._tree.tag_configure("oddrow",  background=C["bg"])
         self._tree.tag_configure("evenrow", background=C["surface"])
+        # Folder highlighted as the drop destination during a drag
+        self._tree.tag_configure("droptarget",
+                                 background=C["success"], foreground="#1e1e2e")
 
         vsb = ttk.Scrollbar(tree_frame, orient="vertical",
                             command=self._tree.yview, style="FB.Vertical.TScrollbar")
@@ -225,6 +256,12 @@ class BrowserPane(tk.Frame):
         self._tree.bind("<Command-r>",         lambda _: self._refresh())
         self._tree.bind("<Escape>",            lambda _: self.close_search())
         self._tree.bind("<F2>",                lambda _: self._rename_selected())
+
+        # Drag-and-drop (between panes) — added handlers so they coexist with
+        # the Treeview's own selection bindings.
+        self._tree.bind("<ButtonPress-1>",     self._drag_press,   add="+")
+        self._tree.bind("<B1-Motion>",         self._drag_motion,  add="+")
+        self._tree.bind("<ButtonRelease-1>",   self._drag_release, add="+")
 
         # Status bar
         self._status = tk.Label(self, text="", font=("Helvetica Neue", 9),
@@ -415,6 +452,125 @@ class BrowserPane(tk.Frame):
         return tags[0] if tags else None
 
     # ------------------------------------------------------------------
+    # Drag and drop (between panes)
+    # ------------------------------------------------------------------
+
+    def _drag_press(self, event):
+        if self.drop_router is not None:
+            self.drop_router.set_active(self)
+        if self._tree.identify_region(event.x, event.y) not in ("tree", "cell"):
+            self._drag = None
+            return
+        iid = self._tree.identify_row(event.y)
+        if not iid:
+            self._drag = None
+            return
+        self._drag = {"x": event.x_root, "y": event.y_root,
+                      "iid": iid, "active": False, "ghost": None}
+
+    def _drag_motion(self, event):
+        d = self._drag
+        if not d:
+            return
+        if not d["active"]:
+            if (abs(event.x_root - d["x"]) < 6
+                    and abs(event.y_root - d["y"]) < 6):
+                return                       # below the drag threshold
+            # Begin the drag: capture what's being dragged.
+            paths = self.selected_paths()
+            clicked = self._iid_path(d["iid"])
+            if clicked and clicked not in paths:
+                paths = [clicked]
+            if not paths:
+                self._drag = None
+                return
+            d["paths"]  = paths
+            d["active"] = True
+            d["ghost"]  = self._make_ghost(len(paths))
+            self._tree.configure(cursor="hand2")
+        g = d["ghost"]
+        if g is not None:
+            g.geometry(f"+{event.x_root + 14}+{event.y_root + 12}")
+        if self.drop_router is not None:
+            self.drop_router.update_drop_highlight(event.x_root, event.y_root)
+        return "break"                       # suppress rubber-band selection
+
+    def _drag_release(self, event):
+        d = self._drag
+        self._drag = None
+        if not d:
+            return
+        if d.get("ghost") is not None:
+            d["ghost"].destroy()
+        self._tree.configure(cursor="")
+        if self.drop_router is not None:
+            self.drop_router.clear_all_highlights()
+        if not d.get("active"):
+            return                           # was just a click, not a drag
+        if self.drop_router is not None:
+            self.drop_router.handle_drop(self, d["paths"],
+                                         event.x_root, event.y_root)
+
+    def _make_ghost(self, n: int) -> tk.Toplevel:
+        g = tk.Toplevel(self)
+        g.overrideredirect(True)
+        try:
+            g.attributes("-topmost", True)
+        except tk.TclError:
+            pass
+        tk.Label(
+            g, text=f"⠿  {n} item{'s' if n != 1 else ''}",
+            bg=C["accent"], fg="white",
+            font=("Helvetica Neue", 10, "bold"), padx=12, pady=4,
+        ).pack()
+        return g
+
+    def point_in_tree(self, x_root: int, y_root: int) -> bool:
+        t = self._tree
+        x0, y0 = t.winfo_rootx(), t.winfo_rooty()
+        return (x0 <= x_root <= x0 + t.winfo_width()
+                and y0 <= y_root <= y0 + t.winfo_height())
+
+    def _folder_iid_at(self, x_root: int, y_root: int) -> str:
+        """iid of the folder row under the cursor, else ''."""
+        t = self._tree
+        iid = t.identify_row(y_root - t.winfo_rooty())
+        if iid:
+            p = self._iid_path(iid)
+            if p and os.path.isdir(p):
+                return iid
+        return ""
+
+    def drop_target_dir(self, x_root: int, y_root: int) -> str:
+        """Folder under the cursor, or the current directory if none."""
+        iid = self._folder_iid_at(x_root, y_root)
+        if iid:
+            return self._iid_path(iid)
+        return self._cwd
+
+    def show_drop_highlight(self, x_root: int, y_root: int):
+        iid = self._folder_iid_at(x_root, y_root)
+        if iid == self._drop_hl:
+            return
+        self.clear_drop_highlight()
+        if iid:
+            tags = list(self._tree.item(iid, "tags"))
+            if "droptarget" not in tags:
+                tags.append("droptarget")
+                self._tree.item(iid, tags=tags)
+            self._drop_hl = iid
+
+    def clear_drop_highlight(self):
+        if self._drop_hl:
+            try:
+                tags = [t for t in self._tree.item(self._drop_hl, "tags")
+                        if t != "droptarget"]
+                self._tree.item(self._drop_hl, tags=tags)
+            except tk.TclError:
+                pass
+            self._drop_hl = ""
+
+    # ------------------------------------------------------------------
     # File operations
     # ------------------------------------------------------------------
 
@@ -428,16 +584,16 @@ class BrowserPane(tk.Frame):
         names = "\n".join(os.path.basename(p) for p in paths[:5])
         extra = f"\n…and {len(paths)-5} more" if len(paths) > 5 else ""
         if not messagebox.askyesno(
-            "Delete", f"Permanently delete?\n{names}{extra}", parent=self
+            "Delete", f"Delete these? (You can undo with ⌘Z.)\n{names}{extra}",
+            parent=self
         ): return
 
-        for p in paths:
-            try:
-                if os.path.isdir(p): shutil.rmtree(p)
-                else:                os.remove(p)
-            except Exception as e:
-                messagebox.showerror("Delete Error",
-                                     f"{os.path.basename(p)}: {e}", parent=self)
+        try:
+            op = undo_mod.perform_delete(paths)
+            if self.undo_mgr is not None:
+                self.undo_mgr.push(op)
+        except Exception as e:
+            messagebox.showerror("Delete Error", str(e), parent=self)
         self._refresh()
 
     def _rename_selected(self, _event=None):
@@ -456,6 +612,8 @@ class BrowserPane(tk.Frame):
         new_path = os.path.join(os.path.dirname(old_path), new_name)
         try:
             os.rename(old_path, new_path)
+            if self.undo_mgr is not None:
+                self.undo_mgr.push(undo_mod.record_rename(old_path, new_path))
         except Exception as e:
             messagebox.showerror("Rename Error", str(e), parent=self)
         self._refresh()
@@ -469,7 +627,10 @@ class BrowserPane(tk.Frame):
         if not name: return
         path = os.path.join(self._cwd, name)
         try:
+            existed = os.path.isdir(path)
             os.makedirs(path, exist_ok=True)
+            if not existed and self.undo_mgr is not None:
+                self.undo_mgr.push(undo_mod.record_new_folder(path))
         except Exception as e:
             messagebox.showerror("Error", str(e), parent=self)
         self._refresh()
@@ -572,11 +733,14 @@ class DualBrowser(tk.Frame):
         self, parent,
         on_copy: Optional[Callable[[list[str], str], None]] = None,
         on_move: Optional[Callable[[list[str], str], None]] = None,
+        undo_mgr=None,
         **kwargs,
     ):
         super().__init__(parent, bg=C["bg"], **kwargs)
         self._on_copy = on_copy or (lambda s, d: None)
         self._on_move = on_move or (lambda s, d: None)
+        self.undo_mgr = undo_mgr
+        self._active_pane = None
         self._build()
 
     def _build(self):
@@ -586,7 +750,7 @@ class DualBrowser(tk.Frame):
 
         self.left = BrowserPane(paned, title="Mac Storage",
                                 root_path=os.path.expanduser("~"),
-                                writable=True)
+                                writable=True, quick_access=True)
         paned.add(self.left, minsize=260)
 
         mid = tk.Frame(paned, bg=C["surface"], width=96)
@@ -597,6 +761,12 @@ class DualBrowser(tk.Frame):
                                  root_path="/Volumes", writable=False,
                                  confined=True)
         paned.add(self.right, minsize=260)
+
+        # Let either pane route drag-and-drop / undo through us.
+        for pane in (self.left, self.right):
+            pane.drop_router = self
+            pane.undo_mgr    = self.undo_mgr
+        self._active_pane = self.left
 
     def _build_mid(self, parent):
         parent.pack_propagate(False)
@@ -618,6 +788,70 @@ class DualBrowser(tk.Frame):
                    bg=C["border"], fg=C["text"], padx=6, pady=7, wraplength=80,
                    command=lambda: self.right.new_folder()).pack(fill="x", pady=(12, 0))
 
+        # Delete the active pane's selection
+        FlatButton(inner, text="🗑 Delete", font=("Helvetica Neue", 10, "bold"),
+                   bg=C["danger"], fg="white", padx=6, pady=7, wraplength=80,
+                   command=self.delete_selected).pack(fill="x", pady=(8, 0))
+
+        # Undo / Redo
+        self._undo_btn = FlatButton(
+            inner, text="↶ Undo", font=("Helvetica Neue", 10, "bold"),
+            bg=C["border"], fg=C["text"], padx=6, pady=6, wraplength=80,
+            command=self.do_undo)
+        self._undo_btn.pack(fill="x", pady=(10, 0))
+        self._redo_btn = FlatButton(
+            inner, text="↷ Redo", font=("Helvetica Neue", 10, "bold"),
+            bg=C["border"], fg=C["text"], padx=6, pady=6, wraplength=80,
+            command=self.do_redo)
+        self._redo_btn.pack(fill="x", pady=(4, 0))
+        self.update_undo_buttons()
+
+    # ------------------------------------------------------------------
+    # Active pane + delete + undo/redo
+    # ------------------------------------------------------------------
+
+    def set_active(self, pane):
+        self._active_pane = pane
+
+    def delete_selected(self):
+        pane = self._active_pane or self.left
+        if not pane.selected_paths():
+            other = self.right if pane is self.left else self.left
+            if other.selected_paths():
+                pane = other
+        pane._delete_selected()
+
+    def do_undo(self):
+        if not self.undo_mgr:
+            return
+        try:
+            self.undo_mgr.undo()
+        except Exception as e:
+            messagebox.showerror("Undo failed", str(e), parent=self)
+        self.refresh_left(); self.refresh_right()
+
+    def do_redo(self):
+        if not self.undo_mgr:
+            return
+        try:
+            self.undo_mgr.redo()
+        except Exception as e:
+            messagebox.showerror("Redo failed", str(e), parent=self)
+        self.refresh_left(); self.refresh_right()
+
+    def update_undo_buttons(self):
+        if not hasattr(self, "_undo_btn"):
+            return
+        um = self.undo_mgr
+        if um and um.can_undo():
+            self._undo_btn.config(state="normal", text=f"↶ Undo")
+        else:
+            self._undo_btn.config(state="disabled", text="↶ Undo")
+        if um and um.can_redo():
+            self._redo_btn.config(state="normal", text="↷ Redo")
+        else:
+            self._redo_btn.config(state="disabled", text="↷ Redo")
+
     def _copy_right(self):
         s, d = self.left.selected_paths(), self.right.cwd
         if s and d: self._on_copy(s, d)
@@ -633,6 +867,76 @@ class DualBrowser(tk.Frame):
     def _move_left(self):
         s, d = self.right.selected_paths(), self.left.cwd
         if s and d: self._on_move(s, d)
+
+    # ------------------------------------------------------------------
+    # Drag-and-drop routing
+    # ------------------------------------------------------------------
+
+    def update_drop_highlight(self, x_root, y_root):
+        """Highlight the folder under the cursor in whichever pane it's over."""
+        over = None
+        for pane in (self.left, self.right):
+            if pane.point_in_tree(x_root, y_root):
+                over = pane
+                break
+        for pane in (self.left, self.right):
+            if pane is over:
+                pane.show_drop_highlight(x_root, y_root)
+            else:
+                pane.clear_drop_highlight()
+
+    def clear_all_highlights(self):
+        self.left.clear_drop_highlight()
+        self.right.clear_drop_highlight()
+
+    def handle_drop(self, source_pane, paths, x_root, y_root):
+        # Which pane was the drop released over?
+        target = None
+        for pane in (self.left, self.right):
+            if pane.point_in_tree(x_root, y_root):
+                target = pane
+                break
+        if target is None:
+            return
+
+        dest = target.drop_target_dir(x_root, y_root)
+        norm_dest = os.path.realpath(dest)
+        norm_srcs = [os.path.realpath(p) for p in paths]
+
+        # Don't drop items into themselves, or back into their own folder.
+        if norm_dest in norm_srcs:
+            return
+        if all(os.path.dirname(s) == norm_dest for s in norm_srcs):
+            return
+
+        # Writing into the NTFS drive requires write access.
+        if target is self.right and not self.right.writable:
+            messagebox.showwarning(
+                "Read-only",
+                "Enable write access on the drive before dropping files here.",
+                parent=self)
+            return
+
+        self._ask_drop_action(paths, dest)
+
+    def _ask_drop_action(self, paths, dest):
+        n = len(paths)
+        label = f"{n} item{'s' if n != 1 else ''}"
+        where = os.path.basename(dest.rstrip("/")) or dest
+        menu = tk.Menu(self, tearoff=False,
+                       bg=C["surface"], fg=C["text"],
+                       activebackground=C["accent"], activeforeground="white",
+                       relief="flat", bd=1)
+        menu.add_command(label=f"📋  Copy {label} → {where}",
+                         command=lambda: self._on_copy(paths, dest))
+        menu.add_command(label=f"➡️  Move {label} → {where}",
+                         command=lambda: self._on_move(paths, dest))
+        menu.add_separator()
+        menu.add_command(label="Cancel")
+        try:
+            menu.tk_popup(self.winfo_pointerx(), self.winfo_pointery())
+        finally:
+            menu.grab_release()
 
     def set_ntfs_root(self, path: str, writable: bool = False):
         self.right.writable = writable

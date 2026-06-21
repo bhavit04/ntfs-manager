@@ -22,6 +22,7 @@ from engine import (
 )
 from filebrowser import DualBrowser
 from transfer import TransferJob, TransferPanel, TransferQueue, ConflictAction
+from undo import UndoManager, record_move, record_copy, purge_trashes
 from setup_wizard import SetupWizard
 from widgets import FlatButton
 
@@ -533,6 +534,7 @@ class App(tk.Tk):
             on_progress=self._on_transfer_progress,
             on_job_done=self._on_transfer_done,
         )
+        self._undo = UndoManager(on_change=self._on_undo_change)
 
         self._build_menu()
         self._build_ui()
@@ -558,6 +560,18 @@ class App(tk.Tk):
         file_m.add_separator()
         file_m.add_command(label="Quit", command=self._on_quit, accelerator="⌘Q")
         self.bind_all("<Command-q>", lambda _: self._on_quit())
+
+        edit_m = tk.Menu(menu, tearoff=False, bg=C["surface"], fg=C["text"])
+        menu.add_cascade(label="Edit", menu=edit_m)
+        edit_m.add_command(label="Undo", command=self._do_undo, accelerator="⌘Z")
+        edit_m.add_command(label="Redo", command=self._do_redo, accelerator="⇧⌘Z")
+        edit_m.add_separator()
+        edit_m.add_command(label="Delete", command=self._delete_selected,
+                           accelerator="⌫")
+        self._edit_menu = edit_m
+        self.bind_all("<Command-z>",        lambda _: self._do_undo())
+        self.bind_all("<Command-Shift-z>",  lambda _: self._do_redo())
+        self.bind_all("<Command-Shift-Z>",  lambda _: self._do_redo())
 
         drive_m = tk.Menu(menu, tearoff=False, bg=C["surface"], fg=C["text"])
         menu.add_cascade(label="Drive", menu=drive_m)
@@ -652,6 +666,7 @@ class App(tk.Tk):
             right,
             on_copy=self._start_copy,
             on_move=self._start_move,
+            undo_mgr=self._undo,
         )
         self._browser.pack(fill="both", expand=True)
 
@@ -932,8 +947,31 @@ class App(tk.Tk):
 
     def _on_transfer_done(self, job: TransferJob, stats):
         self._xfer_panel.notify_done(job, stats)
+        # Record for undo (only completed, non-cancelled transfers)
+        if not stats.cancelled and job.transferred:
+            op = (record_move if job.move else record_copy)(list(job.transferred))
+            self.after(0, lambda: self._undo.push(op))
         self.after(600, self._browser.refresh_left)
         self.after(600, self._browser.refresh_right)
+
+    # ------------------------------------------------------------------
+    # Undo / redo / delete
+    # ------------------------------------------------------------------
+
+    def _do_undo(self):  self._browser.do_undo()
+    def _do_redo(self):  self._browser.do_redo()
+    def _delete_selected(self): self._browser.delete_selected()
+
+    def _on_undo_change(self):
+        self._browser.update_undo_buttons()
+        if hasattr(self, "_edit_menu"):
+            u, r = self._undo.can_undo(), self._undo.can_redo()
+            self._edit_menu.entryconfig(
+                0, label=f"Undo {self._undo.undo_label()}".strip() if u else "Undo",
+                state="normal" if u else "disabled")
+            self._edit_menu.entryconfig(
+                1, label=f"Redo {self._undo.redo_label()}".strip() if r else "Redo",
+                state="normal" if r else "disabled")
 
     # ------------------------------------------------------------------
     # Misc
@@ -988,6 +1026,9 @@ class App(tk.Tk):
                 parent=self,
             ): return
             self._queue.cancel_current()
+        # Empty the recoverable-delete trash on a clean quit (undo is session-only).
+        try: purge_trashes()
+        except Exception: pass
         self.destroy()
 
 
