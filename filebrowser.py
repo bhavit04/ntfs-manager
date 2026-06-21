@@ -98,25 +98,28 @@ class BrowserPane(tk.Frame):
                  bg=C["surface"], fg=C["accent"]).pack(side="left")
 
         # Path / breadcrumb bar
-        path_bar = tk.Frame(self, bg=C["surface2"], pady=4, padx=8)
+        path_bar = tk.Frame(self, bg=C["surface2"], pady=5, padx=8)
         path_bar.pack(fill="x")
 
-        self._up_btn = tk.Button(
-            path_bar, text="↑", font=("Helvetica Neue", 12),
-            bg=C["surface2"], fg=C["text"],
-            relief="flat", bd=0, cursor="hand2", padx=6,
+        self._up_btn = FlatButton(
+            path_bar, text="↑", font=("Helvetica Neue", 13, "bold"),
+            bg=C["border"], fg=C["text"], padx=9, pady=2,
             command=self._go_up,
         )
         self._up_btn.pack(side="left")
 
         self._path_var = tk.StringVar()
+        # Inset rounded-ish field (a darker box) for a more finished look
+        path_box = tk.Frame(path_bar, bg=C["bg"])
+        path_box.pack(side="left", fill="x", expand=True, padx=6)
         self._path_entry = tk.Entry(
-            path_bar, textvariable=self._path_var,
+            path_box, textvariable=self._path_var,
             font=("Menlo", 10),
-            bg=C["surface2"], fg=C["text"],
+            bg=C["bg"], fg=C["subtext"],
             insertbackground=C["text"], relief="flat", bd=0,
+            highlightthickness=0,
         )
-        self._path_entry.pack(side="left", fill="x", expand=True, padx=4)
+        self._path_entry.pack(fill="x", expand=True, padx=8, pady=4)
         self._path_entry.bind("<Return>", lambda _: self.navigate(self._path_var.get()))
 
         self._hidden_var = tk.BooleanVar(value=self._show_hidden)
@@ -147,21 +150,36 @@ class BrowserPane(tk.Frame):
         ).pack(side="right")
 
         # Treeview
-        tree_frame = tk.Frame(self, bg=C["bg"])
+        tree_frame = tk.Frame(self, bg=C["bg"], highlightthickness=0, bd=0)
         tree_frame.pack(fill="both", expand=True)
 
         style = ttk.Style()
         style.theme_use("default")
         style.configure("FB.Treeview",
                         background=C["bg"], foreground=C["text"],
-                        fieldbackground=C["bg"], rowheight=24,
-                        font=("Helvetica Neue", 11), borderwidth=0)
+                        fieldbackground=C["bg"], rowheight=26,
+                        font=("Helvetica Neue", 11),
+                        borderwidth=0, relief="flat")
+        style.layout("FB.Treeview", [           # strip the default field border
+            ("Treeview.treearea", {"sticky": "nswe"})])
         style.configure("FB.Treeview.Heading",
                         background=C["surface"], foreground=C["subtext"],
-                        font=("Helvetica Neue", 10, "bold"), relief="flat")
+                        font=("Helvetica Neue", 10, "bold"),
+                        relief="flat", borderwidth=0, padding=(8, 5))
+        style.map("FB.Treeview.Heading",
+                  background=[("active", C["surface2"])])
         style.map("FB.Treeview",
-                  background=[("selected", C["sel_bg"])],
-                  foreground=[("selected", C["text"])])
+                  background=[("selected", C["accent"])],
+                  foreground=[("selected", "#ffffff")])
+
+        # Dark, slim scrollbars that match the theme (no chunky white bars)
+        for orient in ("Vertical", "Horizontal"):
+            style.configure(f"FB.{orient}.TScrollbar",
+                            background=C["border"], troughcolor=C["bg"],
+                            bordercolor=C["bg"], arrowcolor=C["subtext"],
+                            relief="flat", borderwidth=0)
+            style.map(f"FB.{orient}.TScrollbar",
+                      background=[("active", C["accent"])])
 
         self._tree = ttk.Treeview(tree_frame, style="FB.Treeview",
                                   columns=("size", "modified"),
@@ -173,14 +191,25 @@ class BrowserPane(tk.Frame):
         self._tree.column("size",     width=80,  anchor="e", stretch=False)
         self._tree.column("modified", width=130, anchor="w", stretch=False)
 
-        vsb = ttk.Scrollbar(tree_frame, orient="vertical",   command=self._tree.yview)
-        hsb = ttk.Scrollbar(tree_frame, orient="horizontal", command=self._tree.xview)
+        # Subtle alternating row stripes (professional list look)
+        self._tree.tag_configure("oddrow",  background=C["bg"])
+        self._tree.tag_configure("evenrow", background=C["surface"])
+
+        vsb = ttk.Scrollbar(tree_frame, orient="vertical",
+                            command=self._tree.yview, style="FB.Vertical.TScrollbar")
+        hsb = ttk.Scrollbar(tree_frame, orient="horizontal",
+                            command=self._tree.xview, style="FB.Horizontal.TScrollbar")
         self._tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
         self._tree.grid(row=0, column=0, sticky="nsew")
         vsb.grid(row=0, column=1, sticky="ns")
         hsb.grid(row=1, column=0, sticky="ew")
         tree_frame.rowconfigure(0, weight=1)
         tree_frame.columnconfigure(0, weight=1)
+
+        # Empty-state placeholder (shown when the list has no items)
+        self._placeholder = tk.Label(
+            tree_frame, text="", font=("Helvetica Neue", 12),
+            bg=C["bg"], fg=C["subtext"], justify="center")
 
         # Bindings
         self._tree.bind("<<TreeviewOpen>>",   self._on_open)
@@ -254,6 +283,7 @@ class BrowserPane(tk.Frame):
 
     def _refresh(self):
         self._tree.delete(*self._tree.get_children())
+        self._placeholder.place_forget()
         query = self._search_var.get().lower()
         if query:
             self._populate_search("", self._cwd, query)
@@ -292,11 +322,12 @@ class BrowserPane(tk.Frame):
             except OSError:
                 is_dir, size, mtime, icon = False, "", "", "📄"
 
+            stripe = "evenrow" if count % 2 == 0 else "oddrow"
             iid = self._tree.insert(
                 parent_iid, "end",
                 text=f"  {icon}  {entry.name}",
                 values=(size, mtime),
-                tags=(entry.path,),
+                tags=(entry.path, stripe),
                 open=False,
             )
             if is_dir:
@@ -304,6 +335,22 @@ class BrowserPane(tk.Frame):
 
         if parent_iid == "":
             self._status.config(text=f"  {count} items")
+            self._update_placeholder(count)
+
+    def _update_placeholder(self, count: int):
+        """Show a friendly centered message when the list is empty."""
+        if count == 0:
+            if self.writable:
+                msg = "This folder is empty.\nDrag files here or use “Copy to Drive”."
+            elif self.title == "NTFS Drive":
+                msg = ("Select a drive on the left, then click “Enable Write”\n"
+                       "to browse and edit its files here.")
+            else:
+                msg = "This folder is empty."
+            self._placeholder.config(text=msg)
+            self._placeholder.place(relx=0.5, rely=0.45, anchor="center")
+        else:
+            self._placeholder.place_forget()
 
     def _populate_search(self, parent_iid: str, dirpath: str, query: str):
         try:

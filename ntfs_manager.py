@@ -207,10 +207,16 @@ class Sidebar(tk.Frame):
             for w in self._inner.winfo_children():
                 w.destroy()
             self._rows.clear()
-            tk.Label(self._inner,
-                     text="No NTFS drives\ndetected.\n\nConnect a drive\nand wait…",
+            box = tk.Frame(self._inner, bg=C["bg"])
+            box.pack(pady=40, padx=12, fill="x")
+            tk.Label(box, text="🔌", font=("Helvetica Neue", 30),
+                     bg=C["bg"], fg=C["subtext"]).pack(pady=(0, 8))
+            tk.Label(box, text="No NTFS drives detected",
+                     font=("Helvetica Neue", 11, "bold"),
+                     bg=C["bg"], fg=C["text"], justify="center").pack()
+            tk.Label(box, text="Connect a USB / external drive\nand it will appear here.",
                      font=("Helvetica Neue", 10),
-                     bg=C["bg"], fg=C["subtext"], justify="center").pack(pady=30)
+                     bg=C["bg"], fg=C["subtext"], justify="center").pack(pady=(4, 0))
 
     def select(self, dev: str | None):
         if self._sel_dev and self._sel_dev in self._rows:
