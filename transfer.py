@@ -173,9 +173,32 @@ class TransferJob:
 
     # ------------------------------------------------------------------
 
+    def _sample_speed(self, force: bool = False):
+        """Update speed_bps on a steady ~0.5s cadence, smoothed with an EMA.
+
+        FUSE-T writes through an NFS layer that buffers then flushes in bursts,
+        so the raw per-window rate swings wildly between KB/s and MB/s. An
+        exponential moving average (time constant ~2s) gives a stable number.
+        """
+        now = time.monotonic()
+        dt  = now - self._spd_t0
+        if dt >= 0.5:
+            inst = (self.stats.copied_bytes - self._spd_bytes0) / dt
+            self._spd_ema = inst if self._spd_ema <= 0 \
+                else self._spd_ema + 0.25 * (inst - self._spd_ema)
+            self.stats.speed_bps = self._spd_ema
+            self._spd_t0, self._spd_bytes0 = now, self.stats.copied_bytes
+            force = True                      # rate changed → push an update
+        if force:
+            self.stats.elapsed = now - self._t0
+            self._on_progress(self.stats)
+
     def _run(self):
         t0 = time.monotonic()
-        spd_t0, spd_bytes0 = t0, 0
+        self._t0          = t0
+        self._spd_t0      = t0
+        self._spd_bytes0  = 0
+        self._spd_ema     = 0.0
 
         all_files = _collect_files(self.sources)
         self.stats.total_files = len(all_files)
@@ -247,14 +270,7 @@ class TransferJob:
             self.transferred.append((src, dst))
             self.stats.done_files += 1
 
-            # Speed calculation
-            now = time.monotonic()
-            if (now - spd_t0) >= 0.5:
-                self.stats.speed_bps = (self.stats.copied_bytes - spd_bytes0) / (now - spd_t0)
-                spd_t0, spd_bytes0   = now, self.stats.copied_bytes
-
-            self.stats.elapsed = now - t0
-            self._on_progress(self.stats)
+            self._sample_speed(force=True)
 
         self._caff.stop()
         self.stats.finished  = True
@@ -263,14 +279,56 @@ class TransferJob:
 
     def _copy_chunked(self, src: str, dst: str) -> bool:
         os.makedirs(os.path.dirname(dst), exist_ok=True)
-        with open(src, "rb") as fin, open(dst, "wb") as fout:
-            while True:
-                if self._cancel.is_set():
-                    return False
-                chunk = fin.read(_CHUNK)
-                if not chunk: break
-                fout.write(chunk)
-                self.stats.copied_bytes += len(chunk)
+
+        # Overlap reading and writing: a background reader fills a small bounded
+        # queue while this thread writes. FUSE-T/NFS writes stall periodically on
+        # flushes; reading ahead keeps the write pipeline full during those
+        # stalls instead of idling, which lifts and steadies large-file
+        # throughput. Bounded queue caps read-ahead memory at maxsize × _CHUNK.
+        q: "Queue[Optional[bytes]]" = Queue(maxsize=4)
+        read_err: list[BaseException] = []
+
+        def _reader():
+            try:
+                with open(src, "rb") as fin:
+                    while not self._cancel.is_set():
+                        chunk = fin.read(_CHUNK)
+                        if not chunk:
+                            break
+                        q.put(chunk)
+            except BaseException as e:        # surfaced to the writer below
+                read_err.append(e)
+            finally:
+                q.put(None)                   # sentinel: no more chunks
+
+        reader = threading.Thread(target=_reader, daemon=True)
+        reader.start()
+
+        sentinel_seen = False
+        try:
+            with open(dst, "wb") as fout:
+                while True:
+                    chunk = q.get()
+                    if chunk is None:
+                        sentinel_seen = True
+                        break
+                    if self._cancel.is_set():
+                        return False
+                    fout.write(chunk)
+                    self.stats.copied_bytes += len(chunk)
+                    self._sample_speed()      # mid-file refresh for large files
+        finally:
+            if not sentinel_seen:
+                # Drain so a reader parked on a full queue can reach its sentinel.
+                while q.get() is not None:
+                    pass
+            reader.join(timeout=5)
+
+        if read_err:
+            raise read_err[0]
+        if self._cancel.is_set():
+            return False
+
         try: shutil.copystat(src, dst)
         except OSError: pass
         return True
