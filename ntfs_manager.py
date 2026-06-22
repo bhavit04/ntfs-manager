@@ -677,7 +677,7 @@ class App(tk.Tk):
         sb = tk.Frame(self, bg=C["surface"], pady=4)
         sb.pack(fill="x", side="bottom")
         tk.Label(sb,
-                 text="Free & open-source  •  macFUSE + ntfs-3g",
+                 text="Free & open-source  •  FUSE-T + ntfs-3g",
                  font=("Helvetica Neue", 9),
                  bg=C["surface"], fg=C["subtext"]).pack(side="left", padx=10)
         self._sel_lbl = tk.Label(sb, text="", font=("Helvetica Neue", 9),
@@ -1050,7 +1050,7 @@ class App(tk.Tk):
         messagebox.showinfo(
             "About NTFS Manager",
             "NTFS Manager  —  Free NTFS read/write for macOS\n\n"
-            "• Full read/write access via macFUSE + ntfs-3g\n"
+            "• Full read/write access via FUSE-T + ntfs-3g (kext-free)\n"
             "• Optimised mount flags for maximum ntfs-3g throughput\n"
             "• Format drives as NTFS or exFAT (native, full speed)\n"
             "• Built-in dual-pane file browser\n"
